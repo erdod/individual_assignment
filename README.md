@@ -1,2 +1,253 @@
-# individual_assignment
-Individual assignment for the I.O.T. ALgorithm&amp;Services exam of Engineering in Computer Science
+# Project Introduction
+
+This project develops an Edge Computing system based on ESP32 and FreeRTOS for signal sampling, processing, and transmission. 
+
+The architecture is divided into two main parts:
+* **Node folder**: contains the firmware for an ESP32-S3 that internally generates simulated signals and performs mathematical calculations on them.
+* **Monitor folder**: manages a second ESP32 connected to an INA219 sensor to measure the real-time energy consumption of the entire system.
+
+The node leverages FreeRTOS to manage parallel tasks that generate different types of signals, such as slow, fast, and complex waves. 
+
+Gaussian noise and random anomalies are injected into only one specific type of signal. Statistical filters (**Z-Score** or **Hampel**) are applied exclusively to this signal to clean the data. 
+
+Subsequently, for all signal types, the data is processed through a **Fast Fourier Transform (FFT)** to extract the dominant frequency. 
+
+Thanks to an **Adaptive Sampling** algorithm, the system dynamically increases or decreases the sampling rate based on the FFT results to optimize energy consumption. Finally, the system sends diagnostic reports via MQTT or the LoRaWAN network.
+
+## Code Explanation
+
+This section details how the code works, primarily analyzing the FreeRTOS tasks, the mathematical filters, and the network protocols used.
+
+### 1. Signal and Anomaly Generation (TaskGenerator)
+This task is responsible for generating the data.
+
+* **Clean Signals (Signals 0, 1, 2):** Simple or combined sine waves are generated using the `sin(TWO_PI * frequency * time)` function.
+* **Noise (Signal 3):** Gaussian noise is added via the `generateGaussianNoise` function. The parameters passed are μ = 0 (zero mean) and σ = 0.2 (standard deviation).
+* **Anomaly Generation (Spikes):** Also in Scenario 3, there is a fixed 2% probability (`random(1000) < 20`) that a sample will suffer an anomaly.
+* **Values:** The anomaly takes a random value between ±5.00 and ±15.00 (`random(500, 1500) / 100.0`). This is large enough to heavily corrupt the mean if not filtered.
+
+---
+
+### 2. Processing and Adaptive Sampling (TaskProcessor)
+This task waits for the 128-sample buffer to fill up, after which it performs its main operations.
+
+#### Detailed Analysis of the FFT Algorithm
+The signal processing block transforms data from the **Time Domain** (voltage or sensor readings over seconds) to the **Frequency Domain** (which frequencies make up that signal). This process occurs in four precise mathematical steps:
+
+**1. Data Preparation in the Complex Plane**
+The FFT algorithm is a mathematical function that natively works with Complex Numbers.
+* `vReal` (Real Part): Filled with the 128 physical samples just read from the sensor. It represents the real amplitude of the signal.
+* `vImag` (Imaginary Part): Forced to 0.0. Since the data acquired by our sensor is purely real (we are not measuring complex electromagnetic phases), the initial imaginary component does not exist. However, we must allocate this array because the algorithm temporarily moves data into the imaginary plane during calculations.
+
+**2. Hamming Windowing**
+This is the most critical step for cleaning the signal.
+* **Discontinuity:** The FFT math assumes that the 128-sample packet we provide repeats infinitely, creating a continuous cyclic wave. Unfortunately, by cutting 128 random samples, it is almost impossible for the start of the buffer to perfectly match the end. When the FFT "joins" the end with the start of the next cycle, it sees a sharp "jump" or step. This jump generates nonexistent spurious frequencies that clutter the graph, a phenomenon called *Spectral Leakage*.
+* **Hamming Window:** To solve this, we apply the Hamming Window. It is a bell-shaped mathematical function that multiplies our signal. It leaves the values in the center of the buffer intact but gently squashes the values at both ends towards zero. This way, when the FFT "joins" the end with the start, it always finds a soft zero: the jump disappears, and the frequency calculation is perfectly clean.
+
+**3. The Computation Engine**
+The `FFT.compute(FFT_FORWARD);` function applies the Cooley-Tukey algorithm to mathematically transform the signal from the time domain to the frequency domain. The process overwrites the original arrays, generating complex numbers that indicate the energy and phase of the individual sine waves hidden in the signal.
+
+**4. Conversion to Amplitudes**
+Once the calculation is complete, the `vReal` array contains the vectors representing every single frequency. The `complexToMagnitude` function returns the final result inside `vReal`. At this point, `vReal` contains the actual heights of the spectrum peaks in Hz, allowing the subsequent `majorPeak()` function to scan the array and extract the dominant frequency.
+
+---
+
+#### Statistical Filters: Hampel & Z-Score
+If we are in Scenario 3 (Noise + Anomalies), the system activates two diagnostic algorithms before processing the FFT.
+
+* **Z-Score Filter**
+  * **Theory:** Based on the Empirical Rule (or 3-sigma rule). The code calculates the Mean (μ) and the Standard Deviation (σ) of the entire buffer. A sample is considered anomalous if its absolute distance from the mean exceeds 3 times the standard deviation: `|x - μ| > 3σ`.
+  * **Operation:** Very fast for the CPU, but vulnerable to the *Masking Effect*: if there are too many massive anomalies, the standard deviation widens so much that it hides subsequent peaks.
+
+* **Hampel Filter**
+  * **Theory:** The Hampel algorithm is a robust estimator. Instead of the mean, it calculates the Median. Instead of the standard deviation, it calculates the MAD (Median Absolute Deviation). An anomaly is detected if: `|x - Median| > 3 * (1.4826 * MAD)`.
+  * **Operation:** The code requires sorting the buffer twice using `std::sort`. If a sample is marked as an anomaly, the filter corrects it by replacing it with the median value, thus protecting the integrity of the FFT calculation and the final mean.
+
+---
+
+### 3. Connectivity and Data Transmission (TaskComm)
+This communication task wakes up every 5 seconds, reads the results calculated by the Data Processor, and sends them over the network.
+
+**LoRaWAN Network (Wide Area Network)**
+LoRaWAN is an LPWAN (Low Power Wide Area Network) protocol ideal for transmitting small packets over kilometers of distance.
+* **Operation:** The system uses OTAA (Over-The-Air Activation). Using cryptographic credentials (`joinEUI`, `devEUI`, `appKey`), the node negotiates access with The Things Network (TTN).
+* **Functions:** `radio.setTCXO(1.8)` stabilizes the radio clock. `node.activateOTAA()` performs the Join sequence. `node.sendReceive()` transmits the text payload to the gateway only every 6 iterations (30 seconds) to respect bandwidth constraints (Duty Cycle and TTN Fair Use Policy).
+* **Note:** The device must be registered on The Things Network console, where you can monitor the live flow of messages exchanged between the device and the gateway.
+
+**Wi-Fi and MQTT Network (Local Edge)**
+For MQTT (Message Queuing Telemetry Transport), the sensor (Publisher) does not communicate directly with the clients, but sends the data to a central server called a Broker (Mosquitto).
+* **Operation:** The WiFi library establishes the local network connection. Subsequently, `client.connect()` registers the node on the local server. Using `client.publish(topic_average, msg)`, the system sends the final data string. A `while(!client.connected())` block ensures automatic reconnection in case of temporary network drops, guaranteeing infrastructure reliability.
+* **Setup:** To start the system, you must install Mosquitto MQTT on a PC and activate the service. In the code, you need to update the WiFi credentials and provide the PC's local IP address (which can be found by running `ipconfig` or `ifconfig` in your terminal).
+
+## Results Analysis
+
+### Bonus 1 Results Analysis: Transition (Slow Signal)
+
+**Equation:** `s₀(t) = 5 sin(2π · 0.5 · t)`
+
+Analyzing the logs, the system's adaptation transient is perfectly observable. 
+
+As soon as the signal changes, the FFT detects the sharp drop in the dominant frequency, identifying a peak at **0.55 Hz**. 
+
+Mathematically, calculating the new frequency, the sampling rate should drop to approximately **1.37 Hz**. 
+
+However, the safety lower limit (Floor) comes into play here. To ensure FreeRTOS processing stability, the system caps the Adaptive Sampling Frequency at its minimum allowed value of **10.0 Hz**. 
+
+Because the sampling is slower, the 128-sample buffer takes much longer to fill. Consequently, the End-to-End latency increases significantly, stabilizing between **10,163 ms** and **12,703 ms** (about 10 to 12.7 seconds).
+
+**Why the 10.0 Hz minimum limit is crucial:**
+Setting this floor is a fundamental design choice for a real-world Edge node. If the system were allowed to drop to ~1 Hz, it would take over two full minutes (128 seconds) to fill a single buffer. 
+
+Such an enormous delay would block the FreeRTOS tasks, making the system completely unresponsive to sudden signal changes or emergencies. 
+
+A 10 Hz floor provides the perfect engineering trade-off: it saves a massive amount of battery power compared to high-speed sampling, while keeping the maximum latency under 13 seconds so the node remains alert and reactive.
+
+### Bonus 1 Results Analysis: Transition (Fast Signal)
+
+Now the system generates a fast type of signal: 
+`s₁(t) = 3 sin(2π · 20 · t)`
+
+The logs clearly show the buffer's transition phase. As the old slow samples are pushed out and replaced by high-frequency ones, the FFT detects a sharp rise in the dominant frequency. 
+
+It hits a temporary peak of **44.29 Hz** before naturally settling around **18.13 Hz**.
+
+The most obvious engineering result of this acceleration is the impact on **End-to-End Latency**. 
+
+Because the buffer fills up much faster, the waiting time drops drastically from the 12 seconds of the previous scenario to just **1146 ms** (about 1.1 seconds). 
+
+Naturally, in this high-speed scenario, the system consumes more energy.
+
+### Bonus 1 Results Analysis: Transition (Complex Signal)
+
+The goal is to test the FFT's ability to analyze a signal defined by the sum of two sine waves:
+`s₂(t) = 2 sin(2π · 3 · t) + 4 sin(2π · 5 · t)`
+
+In the absence of noise and anomalies, the system behaves in an extremely predictable and stable manner. 
+
+The FFT accurately identifies the dominant peaks dictated by the harmonics. This causes the system to dynamically oscillate the sampling frequency between **27.7 Hz** and **45.3 Hz**.
+
+Consequently, the buffer fill latency also finds an intermediate equilibrium, consistently settling between **2797 ms** and **4575 ms** (roughly 2.8 to 4.5 seconds).
+
+The CPU execution time per single window remains anchored at approximately **3045 μs** (microseconds). 
+
+This demonstrates that calculating the FFT and the mathematical mean requires very low computational effort, making it perfectly suited for Edge Computing constraints.
+
+## Bonus Part 2 Analysis
+
+Below is the analysis of the signal used for Bonus Part 2 from various aspects to highlight the differences based on the setting of certain parameters:
+
+`s₃(t) = 2 sin(2π · 3 · t) + 4 sin(2π · 5 · t) + n(t) + A(t)`
+
+### Experiment 1 Analysis: Variation of Anomaly Probabilities
+This experiment tests the robustness of the two filtering algorithms (Z-Score and Hampel) as the probability of anomalies increases. By modifying the anomaly injection probability, we can analyze the differences in True Positive Rate (TPR) and False Positive Rate (FPR).
+
+#### 1. Low Anomaly Probability (p = 1%)
+* **True Positives (TPR):** Perfect tie. Both filters behave almost identically, with detection rates that fluctuate but remain aligned.
+* **False Positives (FPR):** Excellent (0.0% for both). No healthy data is erroneously discarded.
+* **Average:** Perfect. Both filters manage to keep the calculated mean very close to zero, effectively eliminating the anomalies.
+* **Considerations:** In low-noise conditions, the Z-Score is the winning choice. With equal diagnostic performance, the Z-Score takes much less CPU time (about 197 µs compared to Hampel's 279 µs), saving energy.
+
+#### 2. Medium Anomaly Probability (p = 5%)
+* **True Positives (TPR):** The separation begins. While they are paired in the first cycles, when windows with multiple close anomalies occur, the Z-Score collapses (detecting only 16.7% of the peaks), whereas Hampel resists much better (detecting 41.7%).
+* **Average:** Because more anomalies escape the Z-Score, its mean starts to become slightly dirtier compared to the one processed by Hampel.
+* **Considerations:** The arithmetic mean on which the Z-Score relies starts to corrupt. Too many peaks artificially widen the Standard Deviation, allowing subsequent anomalies to slip by unnoticed.
+
+#### 3. High Anomaly Probability (p = 10%)
+* **True Positives (TPR):** Z-Score collapse. The logs show a critical moment where the Z-Score manages to identify only 7.1% of the anomalies, while Hampel intercepts three times as many (21.4%) in the exact same window.
+* **Average:** The difference becomes evident and quantifiable. The Z-Score lets extreme peaks pass through, skewing the mean down to -0.43. Hampel, by using the median, limits the mean shift to -0.21.
+* **Considerations:** This test empirically demonstrates the **Masking Effect**. The masking effect is a phenomenon where a high concentration of anomalies artificially widens the system's standard deviation, creating a tolerance threshold so broad that it allows subsequent error peaks to blend in and escape detection by statistical filters like the Z-Score.
+
+### Experiment 2 Analysis: Variation of Window Size
+
+#### 1. Small Window (N = 64)
+* **CPU Performance:** Minimum effort. The total processing time is very low (about 1700 µs). The filters are extremely fast, with Hampel taking just 147 µs.
+* **Latency:** Excellent. The buffer fills quickly, and the End-to-End latency drops to about 0.6 - 1 second, making the system highly responsive.
+* **Memory Consumption & Algorithmic Effort:** Minimal. RAM usage is low, and sorting just 64 numbers requires very little effort from the processor.
+* **Statistical Accuracy:** Unreliable. Precision fluctuates randomly from 100% to 0%. The statistical base is too small: just 2 or 3 consecutive spikes are enough to corrupt the mean and median, causing the filters to fail.
+* **Considerations:** This configuration is ideal only if extreme responsiveness is required, but it comes at the cost of having nearly useless anti-anomaly filters.
+
+#### 2. Standard Window (N = 128)
+* **CPU Performance:** Medium effort. The total processing time doubles compared to the previous case, settling at around 3500 µs.
+* **Latency:** Good. The waiting time increases to about 3 - 4 seconds.
+* **Memory Consumption & Algorithmic Effort:** Balanced. The array does not saturate the microcontroller's RAM, and sorting calculations are still fast.
+* **Statistical Accuracy:** Very high. The 128 values provide a solid statistical base.
+* **Considerations:** This is the best compromise between response speed, energy consumption, and diagnostic precision.
+
+#### 3. Large Window (N = 256)
+* **CPU Performance:** Heavy effort. The system struggles, with total execution time skyrocketing to over 7200 µs. The time for the Hampel filter alone jumps to 560 µs.
+* **Memory Consumption & Algorithmic Effort:** Maximum. The occupied RAM is doubled. Above all, sorting an array of 256 numbers from smallest to largest costs the CPU an exponential amount of effort compared to 128.
+* **Statistical Accuracy:** Maximum. The massive statistical base makes the median-based filter highly precise. It is not fooled by anomalies (TPR at 54.5%), clearly outperforming the Z-Score, which instead begins to yield to noise (TPR stuck at 36.4%).
+* **Considerations:** This configuration should only be used if data precision is the absolute priority, at the total expense of battery consumption and the timeliness of alarms.
+
+### Experiment 3 Analysis: Filtered vs. Unfiltered Bonus Signal
+
+#### 1. Filtered vs. Unfiltered Behavior
+On raw, unfiltered data, noise disrupts the FFT calculation, causing the dominant frequency to fluctuate between 4.78 Hz and 5.19 Hz. 
+
+By filtering the data with Hampel, the FFT stabilizes exactly at the correct value of ~5.00 Hz. 
+
+The logs confirm that Hampel effectively neutralizes the **Masking Effect**, intercepting more than twice the anomalies compared to the Z-Score and keeping the signal mean completely intact.
+
+#### 2. Extreme Anomalies (The 50 Hz False Peak)
+When a cluster of closely spaced spikes occurs, the Hampel filter flattens them all together down to the median. This brutal cut creates an unnatural "step" (discontinuity) in the signal wave. 
+
+The mathematics of the FFT interpret this sudden, sharp jump as a very high-frequency wave (around 50 Hz). 
+
+This mathematical artifact tricks the Adaptive Sampling algorithm, which needlessly pushes the board to sample at maximum speed (around 100 Hz) believing it is tracking a very fast signal.
+
+## Power Consumption Analysis
+
+From the analysis of the logs generated by the code in the "Monitor" project, the three operational phases of the ESP32 are clearly distinguishable.
+
+### 1. Disconnected Phase
+* **Average Current:** 42 - 47 mA
+* **Power:** 36 - 40 mW
+* **Description:** This is the system's minimum consumption. In this phase, the board is only working locally (generating the signal, calculating the FFT, and applying filters). 
+
+  The Wi-Fi and LoRa radio modules are idle. This demonstrates that the pure computational work of Edge Computing absorbs very little energy.
+
+### 2. Active Network Phase
+* **Average Current:** 105 - 107 mA
+* **Power:** 92 mW
+* **Description:** A fixed load of about 60 mA is added to the base consumption. Keeping the Wi-Fi modem constantly turned on to listen to the MQTT broker is the operation that consistently drains the battery. 
+
+  In this state, the LoRa chip is also powered and listening, waiting for its turn to transmit.
+
+### 3. Transmission Peaks
+* **Peak Current:** 132 - 134 mA
+* **Power:** 112 - 114 mW
+* **Description:** This is the moment of maximum hardware effort. It occurs in the exact moments when the ESP's radio module turns on its amplifier to send the data packet over the air to the TTN gateway. 
+
+  This peak lasts for a very short time, after which the consumption immediately drops back to the 105 mA of the active network phase.
+
+  ## LLM-Assisted Development: Analysis and Evaluation
+
+For the development of this project, I relied on Gemini as a technical assistant. I consulted the model to solve specific hardware integration problems, fix bugs, and analyze mathematical anomalies in the results. 
+
+Below, I describe the sequence of interactions, the code quality, and my final considerations.
+
+### 1. Series of Prompts Used
+During development, I faced several practical obstacles, which I solved by sending targeted prompts to the LLM. Here are the main ones:
+
+* **Problem 1: LoRaWAN Connection Error**
+  * **My Prompt:** *"I'm trying to connect my Heltec ESP32-S3 board to TTN using RadioLib, but I keep getting the -1116 error and the connection fails. How do I fix this?"*
+  * **LLM's Response:** The AI explained that error -1116 indicates a reception/transmission failure, often related to the radio module's clock synchronization. It also pointed out that my specific board was missing the setting to power the TCXO. It suggested adding the line `radio.setTCXO(1.8);` before attempting the connection, which instantly solved the problem.
+
+* **Problem 2: Serial Monitor Formatting and Cut Text**
+  * **My Prompt:** *"I asked for your help to format and beautify the Serial Monitor prints to make them look like a professional report. However, I notice that even though the logic is correct, sometimes the lines in the serial monitor merge, letters are missing, or they overlap. Why does this happen?"*
+  * **LLM's Response:** The AI provided the code using `snprintf` and `Serial.printf` to layout the data nicely. Regarding the cut text issue, it explained that it was a **UART Buffer Overflow**. Because the chip was executing three very heavy FFT calculations in a row and then immediately trying to print a huge block of text via the USB cable, the serial port's memory buffer became saturated and lost characters along the way. This reassured me because it meant the system's math was correct; it was merely a cable display limitation.
+
+* **Problem 3: Sudden Frequency Peaks (The Fake 50 Hz)**
+  * **My Prompt:** *"Looking at the bonus signal logs, I see that sometimes, seemingly at random, the dominant frequency calculated by the Hampel filter suddenly spikes to almost 50 Hz, pushing the adaptive sampling to the maximum. Why does it do this?"*
+  * **LLM's Response:** The AI explained the phenomenon in mathematical terms. When "clusters" of close anomalies arrive, the Hampel filter is so aggressive that it flattens them all down to the median. This brutal cut creates a sharp "step" in the signal wave. Since the FFT interprets steps or sharp jumps as very high-frequency waves, the system is temporarily tricked and reads a fake peak at 50 Hz.
+
+* **Problem 4: The Slow Signal Limit (10 Hz Floor)**
+  * **My Prompt:** *"When I use Signal 0 (Slow at 0.5 Hz), Adaptive Sampling following Nyquist sets a very long delay, bringing the sampling frequency down to 1 Hz. The system becomes practically dead and takes forever to respond. How do I handle this?"*
+  * **LLM's Response:** The AI explained that sampling at 1 Hz means taking a full 128 seconds to fill just one buffer. This causes deadlocks in the FreeRTOS operating system. It advised me to insert a safety "Floor" limit set to 10.0 Hz specifically for this signal.
+
+---
+
+### 2. LLM Opportunities, Limitations, and Code Quality
+
+* **Opportunities:** To genuinely utilize the LLM, you must have a solid understanding of the problem you are facing. Otherwise, it can often stumble into errors due to a lack of logical comprehension or by misinterpreting the text provided. When used properly, it is an incredible tool for brainstorming and advanced troubleshooting.
+* **Limitations:** The LLM generates code based on theory, but it doesn't know how it will physically behave on the board. Initially, it provided generic codes for the ESP32, without considering that my specific chip (ESP32-S3) handled pins and hardware differently. Furthermore, the AI has no perception of physical reality: it cannot know in advance if a calculation will take too much time and bog down the system, making real-world empirical testing absolutely essential.
