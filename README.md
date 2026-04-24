@@ -164,7 +164,7 @@ This experiment tests the robustness of the two filtering algorithms (Z-Score an
 
 > CPU Execution Time   : 3496 us     
 > End-to-End Latency     : 2797 ms   
-> FFT Dominant Frequency    : 5.01 Hz 
+> FFT max Frequency    : 5.01 Hz 
 > Adaptive Sampling Freq    : 10.02 Hz 
 > CPU Time Z-Score   :  197 us     
 > CPU Time Hampel    :  279 us       
@@ -177,9 +177,8 @@ This experiment tests the robustness of the two filtering algorithms (Z-Score an
 
 > CPU Execution Time   : 3503 us     
 > End-to-End Latency    : 1273 ms    
-> FFT Dominant Frequency    : 5.09 Hz 
+> FFT max Frequency    : 5.09 Hz 
 > Adaptive  : 10.2 Hz 
-> Hardware Max Sampling Freq: 16633 Hz 
 > CPU Time Z-Score       196 us   
 > CPU Time Hampel : 265 us
 > Z-Score (TPR/FPR)  : 16.7 % / 0.0 %       
@@ -191,9 +190,8 @@ This experiment tests the robustness of the two filtering algorithms (Z-Score an
 
 > CPU Execution Time   : 3503 us     
 > End-to-End Latency    : 1273 ms    
-> FFT Dominant Frequency    : 5.09 Hz 
+> FFT max Frequency    : 5.09 Hz 
 > Adaptive  : 10.2 Hz 
-> Hardware Max Sampling Freq: 16633 Hz 
 > CPU Time Z-Score       196 us   
 > CPU Time Hampel : 265 us
 > Z-Score (TPR/FPR)  : 7.1 % / 0.0 %       
@@ -222,11 +220,11 @@ This experiment tests the robustness of the two filtering algorithms (Z-Score an
 
 > CPU Execution Time : 9355 us       
 > End-to-End Latency  : 1279 ms      
-> [unfiltered]   FFT Dominant Freq : 4.89 Hz 
+> [unfiltered]   FFT max Frequency : 4.89 Hz 
 > [unfiltered]   Adaptive Samp Freq: 9.8 Hz 
-> [Z-SCR] FFT Dominant Freq : 5.03 Hz 
+> [Z-SCR] FFT max Frequency : 5.03 Hz 
 > [Z-SCR] Adaptive Samp Freq: 10.1 Hz 
-> [HMPL]  FFT Dominant Freq : 5.02 Hz 
+> [HMPL]  FFT max Frequency : 5.02 Hz 
 > [HMPL]  Adaptive Samp Freq: 10.0 Hz 
 > CPU Time Z-Score   :225 us       
 > CPU Time Hampel    :275 us     
