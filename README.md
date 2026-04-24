@@ -120,7 +120,7 @@ For MQTT (Message Queuing Telemetry Transport), the sensor (Publisher) does not 
 > LoRaWAN Uplink Scheduled  : 25 s 
 > Execution Time per window : 3075 us 
 > End-to-End Latency  : 12273 ms       
-> FFT Dominant Frequency    : 0.55 Hz 
+> FFT max Frequency    : 0.55 Hz 
 > Adaptive Sampling Freq    : 10.0 Hz 
 > Average    : -1.11 
 
@@ -133,7 +133,7 @@ Now the system generates a fast type of signal:
 > LoRaWAN Uplink Scheduled  : 5 s 
 > Execution Time per window : 3049 us 
 > End-to-End Latency : 1146 ms       
-> FFT Dominant Frequency    : 18.13 Hz 
+> FFT max Frequency    : 18.13 Hz 
 > Adaptive Sampling Freq    : 36.26 Hz 
 > Average Calculated    : 0.00 
 
@@ -146,7 +146,7 @@ The goal is to test the FFT's ability to analyze a signal defined by the sum of 
 > LoRaWAN Uplink Scheduled  : 5 s 
 > Execution Time per window : 3049 us 
 > End-to-End Latency        : 3800 ms 
-> FFT Dominant Frequency    : 5.00 Hz 
+> FFT max Frequency    : 5.00 Hz 
 > Adaptive Sampling Freq    : 10.0 Hz 
 > Average Calculated        : 0.00 
 -----------------------------------
